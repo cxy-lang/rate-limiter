@@ -1,0 +1,93 @@
+module extractors
+
+import { Request } from "stdlib/http.cxy"
+
+// GetIPKey - Extract rate limit key from IP address (default)
+pub struct GetIPKey {
+    func `init`() {
+        // Default constructor - no configuration needed
+    }
+
+    @inline
+    const func get(req: &const Request): String {
+        var ip = req.ip()
+        return __copy!(ip)
+    }
+}
+
+// GetHeaderKey - Extract rate limit key from HTTP header
+pub struct GetHeaderKey {
+    - headerName: String = String("X-API-Key")  // Default header
+
+    func `init`() {
+        // Default constructor
+    }
+
+    func configure[Cfg](cfg: Cfg) {
+        require!(Cfg.isStruct, "cfg must be a struct")
+        #if (has_member!(#Cfg, "headerName", #String))
+            headerName = &&cfg.headerName
+        #if (has_member!(#Cfg, "headerName", #string))
+            headerName = String(cfg.headerName)
+    }
+
+    const func get(req: &const Request): String {
+        var value = req.header(headerName)
+        if (!value) {
+            return String("anonymous")
+        }
+        return String(value&.str(), value&.size())
+    }
+}
+
+// GetCookieKey - Extract rate limit key from cookie
+pub struct GetCookieKey {
+    - cookieName: String = String("session_id")  // Default cookie
+
+    func `init`() {
+        // Default constructor
+    }
+
+    func configure[Cfg](cfg: Cfg) {
+        require!(Cfg.isStruct, "cfg must be a struct")
+        #if (has_member!(#Cfg, "cookieName", #String))
+            cookieName = &&cfg.cookieName
+    }
+
+    const func get(req: &const Request): String {
+        var value = req.cookie(cookieName.__str())
+        if (!value) {
+            return String("anonymous")
+        }
+        return String(value&.str(), value&.size())
+    }
+}
+
+// Tests
+test "GetHeaderKey - extracts default header name" {
+    var extractor = GetHeaderKey{}
+    // Note: Can't easily test without mock Request
+    // Just verify default value is set
+    ok!(extractor.headerName == "X-API-Key")
+}
+
+test "GetHeaderKey - configures custom header name" {
+    var extractor = GetHeaderKey{}
+    extractor.configure({
+        headerName: String("X-Custom-Key")
+    })
+    ok!(extractor.headerName == "X-Custom-Key")
+}
+
+test "GetCookieKey - extracts default cookie name" {
+    var extractor = GetCookieKey{}
+    ok!(extractor.cookieName == "session_id")
+}
+
+test "GetCookieKey - configures custom cookie name" {
+    var extractor = GetCookieKey{}
+    extractor.configure({
+        cookieName: String("my_session")
+    })
+    ok!(extractor.cookieName == "my_session")
+}

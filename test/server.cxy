@@ -1,0 +1,89 @@
+import { RateLimiter } from "../src/middleware.cxy"
+import { Strategy } from "../src/strategies.cxy"
+import { Request, Response, Server, Config, Status, Method } from "stdlib/http.cxy"
+import { parse as parseJson, toJSON } from "stdlib/json.cxy"
+
+@json
+struct ConfigRequest {
+    @json(optional: true)
+    strategy: String = String("FixedWindow")
+    @json(optional: true)
+    maxRequests: u64 = 100
+    @json(optional: true)
+    windowMs: u64 = 60000
+    burstSize: u64? = null
+    refillRate: f64? = null
+}
+
+type RateLimiterByIp = RateLimiter[]
+
+func main(): !void {
+    var server = Server[RateLimiterByIp](Config{})
+
+    // Default configuration
+    var rateLimiter = server.middleware[RateLimiterByIp]()
+    rateLimiter.configure({
+        maxRequests: 100 as u64,
+        windowMs: 60000 as u64
+    })
+
+    // Main endpoint for rate limiting tests
+    server("/", (_: &const Request, res: &Response) => {
+        res.body() << "Hello World!"
+    })
+
+    // Configuration endpoint for dynamic testing (exempt from rate limiting)
+    const configRoute = server("POST /configure", (req: &const Request, res: &Response) => {
+        var body = req.body()
+        stdout << "BODY " << body << "\n"
+        if (body == null || body.empty()) {
+            res.body() << "Missing request body"
+            res.end(Status.BadRequest)
+            return
+        }
+
+        // Parse JSON
+        var config = parseJson[ConfigRequest](body.__str()) catch {
+            res.body() << "Invalid JSON"
+            res.end(Status.BadRequest)
+            return
+        }
+
+        // Map string to Strategy enum
+        var strategy = Strategy.FixedWindow
+        if (config.strategy == "TokenBucket") {
+            strategy = Strategy.TokenBucket
+        } else if (config.strategy == "SlidingWindow") {
+            strategy = Strategy.SlidingWindow
+        }
+
+        // Clear state when reconfiguring
+        rateLimiter.clearAll()
+        rateLimiter.resetStats()
+        const burstSize = config.burstSize || 0 as u64
+        const refillRate = config.refillRate || 0.0 as f64
+
+        // Apply new configuration
+        rateLimiter.configure({
+            strategy: strategy,
+            maxRequests: config.maxRequests,
+            windowMs: config.windowMs,
+            burstSize: burstSize,
+            refillRate: refillRate
+        })
+
+        res.body() << "Configuration updated"
+        res.end()
+    })
+    rateLimiter.exempt(configRoute.id())
+
+    // Statistics endpoint (exempt from rate limiting)
+    const statsRoute = server("GET /stats", (_: &const Request, res: &Response) => {
+        var stats = rateLimiter.getStats()
+        toJSON(res.body(), &stats)
+        res.end()
+    })
+    rateLimiter.exempt(statsRoute.id())
+
+    server.start()
+}

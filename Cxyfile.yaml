@@ -7,5 +7,48 @@ package:
 
 dependencies: []
 
+install:
+  - name: disable-macos-wait-async-warning
+    required: true
+    script: |
+      if [ $(uname) = "Darwin" ]; then
+        # Disable macOS wait async warning
+        echo "--define=MACOS_WAIT_ASYNC_WARNING_OFF=1"
+      fi
+
+install-dev:
+  - name: openssl
+    required: true
+    script: |
+      # We do not libs, cxy sources usually specify the libs they need
+      cxy package find-system openssl --include-dir --lib-dir
+
+builds:
+  test-server:
+    entry: test/server.cxy
+    output: test-server
+    defines:
+      - "CXY_TRACE_LEVEL=1"
+
 tests:
   - file: "src/**/*.cxy"
+  - file: "test/integration.cxy"
+
+scripts:
+  env:
+    BUILD_DIR: "{{SOURCE_DIR}}/.cxy/build"
+  build-ts:
+    inputs:
+      - test/**/*.cxy
+      - src/**/*.cxy
+    outputs:
+      - "{{BUILD_DIR}}/test-server"
+    command: |
+      cxy package build test-server
+  integration:
+    depends: ["build-ts"]
+    command: |
+      # Start the server asynchronously, cxy will kill the process after
+      cxy utils async-cmd-start {{BUILD_DIR}}/test-server --capture
+      # Run the integration tests
+      cxy package test test/integration.cxy

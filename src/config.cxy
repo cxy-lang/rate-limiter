@@ -1,0 +1,20 @@
+module config
+
+import { Status } from "stdlib/http.cxy"
+import { Strategy } from "./strategies.cxy"
+
+// Main middleware configuration
+pub struct Config {
+    strategy: Strategy = .FixedWindow
+    maxRequests: u64 = 100
+    windowMs: u64 = 60000                           // 1 minute default
+    headerPrefix: String = String("X-RateLimit-")
+    statusCode: Status = .TooManyRequests           // 429
+    includeHeaders: bool = true
+    cleanupIntervalMs: u64 = 60000                  // Cleanup every minute
+    stateTimeoutMs: u64 = 300000                    // Remove inactive states after 5min
+
+    // Token bucket specific
+    burstSize: u64 = 0                              // 0 = same as maxRequests
+    refillRate: f64 = 0.0                           // 0 = auto-calculate
+}

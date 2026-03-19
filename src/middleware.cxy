@@ -1,0 +1,326 @@
+module middleware
+
+import { Request, Response, Status } from "stdlib/http.cxy"
+import { Time } from "stdlib/time.cxy"
+import { HashSet } from "stdlib/hash.cxy"
+import { Channel, yld } from "stdlib/coro.cxy"
+import "stdlib/log.cxy"
+
+import { Config } from "./config.cxy"
+import { GetIPKey } from "./extractors.cxy"
+import { HashMapStorage, RateLimitState } from "./storage.cxy"
+import { Strategy, FixedWindowState, TokenBucketState, SlidingWindowState, CheckResult } from "./strategies.cxy"
+
+// Statistics tracking
+@json
+pub struct RateLimiterStats {
+    totalRequests: u64 = 0   // Total requests processed
+    totalAllowed: u64 = 0    // Requests that were allowed
+    totalDenied: u64 = 0     // Requests that were rate limited (429)
+    currentKeys: u64 = 0     // Current number of unique keys tracked
+}
+
+// Main RateLimiter middleware class
+pub class RateLimiter[GetKey = GetIPKey, Storage = HashMapStorage] {
+    @static
+    - LOG_TAG = "RateLimiter"
+
+    // Compile-time type requirements
+    require!(GetKey.isStruct, "GetKey must be a struct type, got {t}", #GetKey)
+    require!(has_member!(#GetKey, "op__init", #func() -> void),
+             "GetKey `{t}` must be default constructible: func `init`()", #GetKey)
+    require!(has_member!(#GetKey, "get", #const func(_: &const Request) -> String),
+             "GetKey `{t}` must implement: const func get(req: &const Request): String", #GetKey)
+
+    // Storage type requirements
+    require!(has_member!(#Storage, "get", #func(_: String) -> RateLimitState?),
+             "Storage `{t}` must implement: func get(key: String)", #Storage)
+    require!(has_member!(#Storage, "set", #func(_: String, _: RateLimitState) -> void),
+             "Storage `{t}` must implement: func set(key: String, state: RateLimitState)", #Storage)
+    require!(has_member!(#Storage, "cleanup", #func(_: u64, _: u64) -> void),
+             "Storage `{t}` must implement: func cleanup(now: u64, timeoutMs: u64)", #Storage)
+
+    // Forward storage dependencies if any
+    #if (has_type!(#Storage, :Deps)) {
+        type Deps = Storage.Deps
+    }
+
+    _keyExtractor: GetKey
+    _config: Config
+    _storage: Storage
+    _lastCleanup: u64
+    _stats: RateLimiterStats
+    _exemptRoutes: HashSet[u64]
+    _cleanupChan: Channel[bool]
+    _cleaning = false
+
+    func `init`() {
+        _keyExtractor = GetKey()
+        _config = Config{}
+        _storage = Storage()
+        _lastCleanup = timestamp()
+        _exemptRoutes = HashSet[u64]()
+        _cleanupChan = Channel[bool]()
+    }
+
+    // Access to key extractor for configuration
+    @[inline, prop]
+    func keyExtractor() => &_keyExtractor
+
+    // Configuration method
+    func configure[Cfg](@unused cfg: Cfg) {
+        require!(Cfg.isStruct, "cfg must be a struct {t}", #Cfg)
+        #if (has_member!(#Cfg, "strategy", #Strategy))
+            _config.strategy = cfg.strategy
+        #if (has_member!(#Cfg, "maxRequests", #u64))
+            _config.maxRequests = cfg.maxRequests
+        #if (has_member!(#Cfg, "windowMs", #u64))
+            _config.windowMs = cfg.windowMs
+        #if (has_member!(#Cfg, "headerPrefix", #String))
+            _config.headerPrefix = &&cfg.headerPrefix
+        #if (has_member!(#Cfg, "statusCode", #Status))
+            _config.statusCode = cfg.statusCode
+        #if (has_member!(#Cfg, "includeHeaders", #bool))
+            _config.includeHeaders = cfg.includeHeaders
+        #if (has_member!(#Cfg, "cleanupIntervalMs", #u64))
+            _config.cleanupIntervalMs = cfg.cleanupIntervalMs
+        #if (has_member!(#Cfg, "burstSize", #u64))
+            _config.burstSize = cfg.burstSize
+        #if (has_member!(#Cfg, "refillRate", #f64))
+            _config.refillRate = cfg.refillRate
+    }
+
+    // Exempt a route from rate limiting
+    @inline
+    func exempt(routeId: u64) {
+        _exemptRoutes.insert(routeId)
+    }
+
+    // Middleware before handler
+    func before(req: &const Request, res: &Response) {
+        // Check if this route is exempt from rate limiting
+        var routeId = req.route().id()
+        if (_exemptRoutes.contains(routeId)) {
+            // Skip rate limiting for this route
+            return
+        }
+
+        // Track total requests
+        _stats.totalRequests += 1
+
+        // 1. Extract key using the GetKey type
+        var key = _keyExtractor.get(req)
+        TRC1!( "key is " << key )
+        // 2. Get current time
+        var now = timestamp()
+
+        // 3. Get or create state for this key
+        var stateOpt = _storage.get(key)
+        var result: CheckResult
+
+        if (!stateOpt) {
+            // Initialize new state based on strategy
+            switch _config.strategy {
+                Strategy.FixedWindow => {
+                    var newState = FixedWindowState{}
+                    result = newState.check(now, _config.maxRequests, _config.windowMs)
+                    _storage.set(&&key, newState)
+                }
+                Strategy.TokenBucket => {
+                    // Use burstSize if set, otherwise use maxRequests as capacity
+                    var capacity = _config.burstSize
+                    if (capacity == 0) {
+                        capacity = _config.maxRequests
+                    }
+
+                    // Use refillRate if set, otherwise auto-calculate from maxRequests/window
+                    var refillRate = _config.refillRate
+                    if (refillRate == 0.0) {
+                        refillRate = _config.maxRequests as f64 / (_config.windowMs as f64 / 1000.0)
+                    }
+
+                    var newState = TokenBucketState{}
+                    result = newState.check(now, capacity as f64, refillRate)
+                    _storage.set(&&key, newState)
+                }
+                Strategy.SlidingWindow => {
+                    var newState = SlidingWindowState{}
+                    result = newState.check(now, _config.maxRequests, _config.windowMs)
+                    _storage.set(&&key, newState)
+                }
+                Strategy.SlidingLog => {
+                    // TODO: Implement in Phase 4
+                    result = CheckResult{ allowed: false, remaining: 0, resetAt: now }
+                }
+            }
+        } else {
+            // Update existing state
+            match *stateOpt {
+                FixedWindowState as state => {
+                    result = state.check(now, _config.maxRequests, _config.windowMs)
+                    _storage.set(&&key, state)
+                }
+                TokenBucketState as state => {
+                    var capacity = _config.burstSize
+                    if (capacity == 0) {
+                        capacity = _config.maxRequests
+                    }
+
+                    var refillRate = _config.refillRate
+                    if (refillRate == 0.0) {
+                        refillRate = _config.maxRequests as f64 / (_config.windowMs as f64 / 1000.0)
+                    }
+
+                    result = state.check(now, capacity as f64, refillRate)
+                    _storage.set(&&key, state)
+                }
+                SlidingWindowState as state => {
+                    result = state.check(now, _config.maxRequests, _config.windowMs)
+                    _storage.set(&&key, state)
+                }
+            }
+        }
+
+        // 4. Set rate limit headers if configured
+        if _config.includeHeaders {
+            res.header(f"{_config.headerPrefix}Limit", f"{_config.maxRequests}")
+            res.header(f"{_config.headerPrefix}Remaining", f"{result.remaining}")
+            res.header(f"{_config.headerPrefix}Reset", f"{result.resetAt}")
+        }
+
+        // 5. Deny request if limit exceeded
+        if !result.allowed {
+            _stats.totalDenied += 1
+            res.body() << "Rate limit exceeded"
+            res.end(_config.statusCode)
+            return
+        }
+
+        // Request is allowed, continue to route handler
+        _stats.totalAllowed += 1
+    }
+
+    func after(_: &const Request, _: &Response) {
+        if _storage.size() > 0 && !_cleaning {
+            async _doCleanup()
+        }
+    }
+
+    // Manual operations (Phase 4)
+    func reset(key: String) {
+        _storage.remove(key)
+    }
+
+    func clearAll() {
+        _storage.clear()
+    }
+
+    // Get current statistics
+    func getStats(): &RateLimiterStats {
+        _stats.currentKeys = _storage.size()
+        return &_stats
+    }
+
+    // Reset statistics counters (keeps rate limit state)
+    func resetStats() {
+        _stats.totalRequests = 0
+        _stats.totalAllowed = 0
+        _stats.totalDenied = 0
+        _stats.currentKeys = 0
+    }
+
+    func _doCleanup(): void {
+        _cleaning = true
+        yld() // Yield to avoid blocking ongoing request
+        while _storage.size() > 0 {
+            var value = _cleanupChan.receive(<i64>_config.cleanupIntervalMs)
+            if !!value {
+                // Received signal to stop cleanup
+                break
+            }
+            TRC1!( "Cleaning up expired entries " << _storage.size() )
+            _storage.cleanup(timestamp(), _config.stateTimeoutMs)
+        }
+        _cleaning = false
+    }
+}
+
+// Tests
+test "RateLimiter - default configuration" {
+    var limiter = RateLimiter[]()
+    ok!(limiter._config.maxRequests == 100)
+    ok!(limiter._config.windowMs == 60000)
+    ok!(limiter._config.strategy == Strategy.FixedWindow)
+}
+
+test "RateLimiter - configure maxRequests" {
+    var limiter = RateLimiter[]()
+    limiter.configure({
+        maxRequests: 10 as u64
+    })
+    ok!(limiter._config.maxRequests == 10)
+}
+
+test "RateLimiter - configure windowMs" {
+    var limiter = RateLimiter[]()
+    limiter.configure({
+        windowMs: 5000 as u64
+    })
+    ok!(limiter._config.windowMs == 5000)
+}
+
+test "RateLimiter - configure strategy" {
+    var limiter = RateLimiter[]()
+    limiter.configure({
+        strategy: Strategy.TokenBucket
+    })
+    ok!(limiter._config.strategy == Strategy.TokenBucket)
+}
+
+test "RateLimiter - configure multiple settings" {
+    var limiter = RateLimiter[]()
+    limiter.configure({
+        strategy: Strategy.SlidingWindow,
+        maxRequests: 50 as u64,
+        windowMs: 30000 as u64
+    })
+    ok!(limiter._config.strategy == Strategy.SlidingWindow)
+    ok!(limiter._config.maxRequests == 50)
+    ok!(limiter._config.windowMs == 30000)
+}
+
+test "RateLimiter - clearAll removes states" {
+    var limiter = RateLimiter[]()
+    // Add a state manually for testing
+    var state = FixedWindowState{}
+    limiter._storage.set(String("test-key"), state)
+    ok!(limiter._storage.size() > 0)
+
+    limiter.clearAll()
+    ok!(limiter._storage.size() == 0)
+}
+
+test "RateLimiter - tracks basic statistics" {
+    var limiter = RateLimiter[]()
+
+    // Initial stats should be zero
+    var stats = limiter.getStats()
+    ok!(stats.totalRequests == 0)
+    ok!(stats.totalAllowed == 0)
+    ok!(stats.totalDenied == 0)
+}
+
+test "RateLimiter - resetStats clears counters" {
+    var limiter = RateLimiter[]()
+
+    // Manually set some stats
+    limiter._stats.totalRequests = 100
+    limiter._stats.totalAllowed = 90
+    limiter._stats.totalDenied = 10
+
+    limiter.resetStats()
+
+    ok!(limiter._stats.totalRequests == 0)
+    ok!(limiter._stats.totalAllowed == 0)
+    ok!(limiter._stats.totalDenied == 0)
+}

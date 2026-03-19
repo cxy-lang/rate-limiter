@@ -1,0 +1,364 @@
+module strategies
+
+import { Time } from "stdlib/time.cxy"
+
+// Rate limiting strategy types
+pub enum Strategy {
+    FixedWindow,
+    TokenBucket,
+    SlidingWindow,
+    SlidingLog
+}
+
+// Fixed Window state tracking
+pub struct FixedWindowState {
+    count: u64 = 0           // Request count in current window
+    windowStart: u64 = 0     // Window start timestamp (ms)
+    lastAccess: u64 = 0      // Last access timestamp for cleanup
+
+    func check(now: u64, maxRequests: u64, windowMs: u64): CheckResult {
+        var result = CheckResult{}
+
+        // Update last access time
+        lastAccess = now
+
+        // Check if we're in a new window
+        if (now - windowStart >= windowMs) {
+            // Reset window
+            windowStart = now
+            count = 0
+        }
+
+        // Calculate reset time
+        result.resetAt = windowStart + windowMs
+
+        // Check if request is allowed
+        if (count < maxRequests) {
+            count += 1
+            result.allowed = true
+            result.remaining = maxRequests - count
+        } else {
+            result.allowed = false
+            result.remaining = 0
+        }
+
+        return result
+    }
+}
+
+// Token Bucket state (placeholder for Phase 2)
+pub struct TokenBucketState {
+    tokens: f64 = 0.0        // Current token count
+    lastRefill: u64 = 0      // Last refill timestamp (ms)
+    capacity: f64 = 0.0      // Max tokens
+    refillRate: f64 = 0.0    // Tokens per second
+    lastAccess: u64 = 0      // Last access timestamp for cleanup
+
+    func check(now: u64, capacity: f64, refillRate: f64): CheckResult {
+        var result = CheckResult{}
+
+        // Update last access time
+        lastAccess = now
+
+        // Initialize on first use
+        if (this.capacity == 0.0) {
+            this.capacity = capacity
+            this.refillRate = refillRate
+            this.tokens = capacity
+            this.lastRefill = now
+        }
+
+        // Calculate time elapsed since last refill
+        var elapsed = now - lastRefill
+
+        // Refill tokens based on elapsed time
+        if (elapsed > 0) {
+            var tokensToAdd = (elapsed as f64 / 1000.0) * refillRate
+            tokens = tokens + tokensToAdd
+
+            // Cap at capacity
+            if (tokens > capacity) {
+                tokens = capacity
+            }
+
+            lastRefill = now
+        }
+
+        // Check if we have at least 1 token
+        if (tokens >= 1.0) {
+            // Consume 1 token
+            tokens -= 1.0
+            result.allowed = true
+            result.remaining = tokens as u64
+        } else {
+            result.allowed = false
+            result.remaining = 0
+        }
+
+        // Calculate when next token will be available
+        if (tokens < capacity) {
+            var timeToNextToken = ((1.0 - (tokens - (tokens as u64 as f64))) / refillRate * 1000.0) as u64
+            result.resetAt = now + timeToNextToken
+        } else {
+            result.resetAt = now
+        }
+
+        return result
+    }
+}
+
+// Sliding Window Counter state (placeholder for Phase 2)
+pub struct SlidingWindowState {
+    currentCount: u64 = 0    // Current window count
+    previousCount: u64 = 0   // Previous window count
+    windowStart: u64 = 0     // Current window start (ms)
+    lastAccess: u64 = 0      // Last access timestamp for cleanup
+
+    func check(now: u64, maxRequests: u64, windowMs: u64): CheckResult {
+        var result = CheckResult{}
+
+        // Update last access time
+        lastAccess = now
+
+        // Check if we need to move to a new window
+        if (now - windowStart >= windowMs) {
+            // Shift to new window
+            previousCount = currentCount
+            currentCount = 0
+            windowStart = now
+        }
+
+        // Calculate position in current window (0.0 to 1.0)
+        var windowPosition = (now - windowStart) as f64 / windowMs as f64
+
+        // Calculate weighted count from previous and current windows
+        var previousWeight = 1.0 - windowPosition
+        var estimatedCount = (previousCount as f64 * previousWeight) + currentCount as f64
+
+        // Calculate reset time
+        result.resetAt = windowStart + windowMs
+
+        // Check if request is allowed
+        if (estimatedCount < maxRequests as f64) {
+            currentCount += 1
+            result.allowed = true
+            result.remaining = maxRequests - (estimatedCount as u64) - 1
+        } else {
+            result.allowed = false
+            result.remaining = 0
+        }
+
+        return result
+    }
+}
+
+// Sliding Log state (placeholder for Phase 2)
+// Note: This will need Vector[u64] for timestamps
+// pub struct SlidingLogState {
+//     timestamps: Vector[u64]
+//     windowDuration: u64
+// }
+
+// Check result from rate limit check
+pub struct CheckResult {
+    allowed: bool = false
+    remaining: u64 = 0
+    resetAt: u64 = 0
+}
+
+// Tests
+test "FixedWindow - allows requests under limit" {
+    var state = FixedWindowState{}
+    var now = 1000`u64
+
+    var result = state.check(now, 10, 1000)
+    ok!(result.allowed == true)
+    ok!(result.remaining == 9)
+    ok!(state.count == 1)
+}
+
+test "FixedWindow - denies requests over limit" {
+    var state = FixedWindowState{}
+    var now = 1000`u64
+
+    // Fill up to limit
+    for (const i: 0..10) {
+        state.check(now, 10, 1000)
+    }
+
+    // 11th request should be denied
+    var result = state.check(now, 10, 1000)
+    ok!(result.allowed == false)
+    ok!(result.remaining == 0)
+}
+
+test "FixedWindow - resets after window expires" {
+    var state = FixedWindowState{}
+    var now = 1000`u64
+
+    // Fill up the window
+    for (const i: 0..10) {
+        state.check(now, 10, 1000)
+    }
+
+    // Next request denied
+    var result = state.check(now, 10, 1000)
+    ok!(result.allowed == false)
+
+    // Move to next window
+    now = 2000
+    result = state.check(now, 10, 1000)
+    ok!(result.allowed == true)
+    ok!(result.remaining == 9)
+    ok!(state.count == 1)
+}
+
+test "FixedWindow - calculates reset time correctly" {
+    var state = FixedWindowState{}
+    var now = 5000`u64
+
+    var result = state.check(now, 10, 1000)
+    ok!(result.resetAt == 6000)
+}
+
+test "TokenBucket - allows initial burst" {
+    var state = TokenBucketState{}
+    var now = 1000`u64
+
+    // First request initializes with full capacity
+    var result = state.check(now, 10.0, 1.0)
+    ok!(result.allowed == true)
+    ok!(state.tokens >= 9.0)
+}
+
+test "TokenBucket - denies when tokens exhausted" {
+    var state = TokenBucketState{}
+    var now = 1000`u64
+
+    // Initialize and consume all 10 tokens
+    for (const i: 0..10) {
+        state.check(now, 10.0, 1.0)
+    }
+
+    // 11th request should be denied
+    var result = state.check(now, 10.0, 1.0)
+    ok!(result.allowed == false)
+}
+
+test "TokenBucket - refills tokens over time" {
+    var state = TokenBucketState{}
+    var now = 1000`u64
+
+    // Initialize and consume all tokens
+    for (const i: 0..10) {
+        state.check(now, 10.0, 1.0)
+    }
+
+    // Should be denied
+    var result = state.check(now, 10.0, 1.0)
+    ok!(result.allowed == false)
+
+    // Wait 2 seconds (2 tokens refill at 1 token/sec)
+    now = 3000
+    result = state.check(now, 10.0, 1.0)
+    ok!(result.allowed == true)
+
+    // Can make another request
+    result = state.check(now, 10.0, 1.0)
+    ok!(result.allowed == true)
+
+    // Third should be denied (only 2 tokens refilled)
+    result = state.check(now, 10.0, 1.0)
+    ok!(result.allowed == false)
+}
+
+test "TokenBucket - caps at capacity" {
+    var state = TokenBucketState{}
+    var now = 1000`u64
+
+    // Initialize
+    state.check(now, 10.0, 1.0)
+
+    // Wait long time (would refill more than capacity)
+    now = 100000
+    var result = state.check(now, 10.0, 1.0)
+    ok!(result.allowed == true)
+
+    // Should have capacity - 1 tokens (9), not more
+    ok!(state.tokens <= 10.0)
+}
+
+test "SlidingWindow - allows requests under limit" {
+    var state = SlidingWindowState{}
+    var now = 1000`u64
+
+    var result = state.check(now, 10, 1000)
+    ok!(result.allowed == true)
+    ok!(state.currentCount == 1)
+}
+
+test "SlidingWindow - denies when limit exceeded" {
+    var state = SlidingWindowState{}
+    var now = 1000`u64
+
+    // Fill up current window
+    for (const i: 0..10) {
+        state.check(now, 10, 1000)
+    }
+
+    // 11th request denied
+    var result = state.check(now, 10, 1000)
+    ok!(result.allowed == false)
+}
+
+test "SlidingWindow - smooths boundary with weighted average" {
+    var state = SlidingWindowState{}
+    var now = 1000`u64
+
+    // Fill previous window with 10 requests
+    for (const i: 0..10) {
+        state.check(now, 10, 1000)
+    }
+
+    // Manually shift to next window to set up test state
+    state.previousCount = state.currentCount
+    state.currentCount = 0
+    state.windowStart = 2000
+
+    // Move to 50% through the new window
+    now = 2500
+
+    // At 50% into window (position = 0.5):
+    // Previous window weight: 1.0 - 0.5 = 0.5
+    // Estimated: (10 * 0.5) + 0 = 5.0
+    // Should allow 5 more requests (limit is 10)
+    for (const i: 0..5) {
+        var result = state.check(now, 10, 1000)
+        ok!(result.allowed == true)
+    }
+
+    // Now currentCount = 5, estimated = (10 * 0.5) + 5 = 10.0
+    // 6th request should be denied (would make estimated = 10.5)
+    var result = state.check(now, 10, 1000)
+    ok!(result.allowed == false)
+}
+
+test "SlidingWindow - shifts to new window" {
+    var state = SlidingWindowState{}
+    var now = 1000`u64
+
+    // Add 5 requests in first window
+    for (const i: 0..5) {
+        state.check(now, 10, 1000)
+    }
+
+    ok!(state.currentCount == 5)
+
+    // Move to next window
+    now = 2000
+    state.check(now, 10, 1000)
+
+    // Previous count should be 5, current should be 1
+    ok!(state.previousCount == 5)
+    ok!(state.currentCount == 1)
+}

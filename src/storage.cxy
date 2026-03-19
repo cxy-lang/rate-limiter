@@ -1,0 +1,165 @@
+module storage
+
+import { HashMap } from "stdlib/hash.cxy"
+import { Vector } from "stdlib/vector.cxy"
+
+import { FixedWindowState, TokenBucketState, SlidingWindowState } from "./strategies.cxy"
+
+// Storage interface requirements (enforced at compile-time):
+// - func get(key: String): Optional[RateLimitState]
+// - func set(key: String, state: RateLimitState)
+// - func remove(key: String)
+// - func clear()
+// - func cleanup(now: u64, timeoutMs: u64)
+//
+// Optional:
+// - type Deps = (MiddlewareA, MiddlewareB, ...) for dependencies
+
+// Rate limit state union type
+pub type RateLimitState = FixedWindowState | TokenBucketState | SlidingWindowState
+
+// HashMap-based storage (in-memory, single-server)
+pub class HashMapStorage {
+    - _states: HashMap[String, RateLimitState, HashCase, EqualsCase]
+
+    func `init`() {
+        _states = HashMap[String, RateLimitState, HashCase, EqualsCase]()
+    }
+
+    // Get state for a key
+    @inline func get(key: String): RateLimitState? {
+        var result = _states.[&&key]
+        if !result {
+            return null
+        }
+
+        return __copy!(*result)
+    }
+
+    // Set state for a key
+    @inline func set(key: String, state: RateLimitState) {
+        _states.[&&key] = state
+    }
+
+    // Remove specific key
+    @inline func remove(key: String) {
+        _states.remove(key)
+    }
+
+    // Clear all states
+    @inline func clear() {
+        _states.clear()
+    }
+
+    // Cleanup expired states
+    func cleanup(now: u64, timeoutMs: u64) {
+        // Collect keys to remove (can't modify map while iterating)
+        var toRemove = Vector[String]()
+
+        for (const kv: _states) {
+            var state = kv.1
+
+            // Check last access time based on state type
+            var lastAccess: u64 = 0
+            match (state) {
+                FixedWindowState as s => {
+                    lastAccess = s.lastAccess
+                }
+                TokenBucketState as s => {
+                    lastAccess = s.lastAccess
+                }
+                SlidingWindowState as s => {
+                    lastAccess = s.lastAccess
+                }
+            }
+
+            // Mark for removal if expired
+            if (now - lastAccess > timeoutMs) {
+                toRemove.push(__copy!(kv.0))
+            }
+        }
+
+        // Remove expired keys
+        for (const it: toRemove) {
+            _states.remove(__copy!(it.0))
+        }
+    }
+
+    // Get statistics
+    func size(): u64 {
+        return _states.size()
+    }
+}
+
+// Tests
+test "HashMapStorage - get returns None for missing key" {
+    var storage = HashMapStorage()
+    var result = storage.get(String("missing"))
+    ok!(!result)
+}
+
+test "HashMapStorage - set and get state" {
+    var storage = HashMapStorage()
+    var state = FixedWindowState{}
+    state.count = 5
+
+    storage.set(String("test-key"), state)
+    var retrieved = storage.get(String("test-key"))
+
+    ok!(!!retrieved)
+    match (*retrieved) {
+        FixedWindowState as s => {
+            ok!(s.count == 5)
+        }
+        ... => {
+            ok!(false) // Should be FixedWindowState
+        }
+    }
+}
+
+test "HashMapStorage - remove key" {
+    var storage = HashMapStorage()
+    var state = FixedWindowState{}
+
+    storage.set(String("test-key"), state)
+    ok!(!!storage.get(String("test-key")))
+
+    storage.remove(String("test-key"))
+    ok!(!storage.get(String("test-key")))
+}
+
+test "HashMapStorage - clear all states" {
+    var storage = HashMapStorage()
+
+    storage.set(String("key1"), FixedWindowState{})
+    storage.set(String("key2"), FixedWindowState{})
+    ok!(storage.size() == 2)
+
+    storage.clear()
+    ok!(storage.size() == 0)
+}
+
+test "HashMapStorage - cleanup removes expired states" {
+    var storage = HashMapStorage()
+    var now = 10000`u64
+
+    // Add state with old lastAccess
+    var oldState = FixedWindowState{}
+    oldState.lastAccess = 1000  // 9 seconds ago
+    storage.set(String("old-key"), oldState)
+
+    // Add state with recent lastAccess
+    var newState = FixedWindowState{}
+    newState.lastAccess = 9000  // 1 second ago
+    storage.set(String("new-key"), newState)
+
+    ok!(storage.size() == 2)
+
+    // Cleanup with 5 second timeout
+    storage.cleanup(now, 5000)
+
+    // Old state should be removed, new state should remain
+    ok!(storage.size() == 1)
+    ok!(!storage.get(String("old-key")))
+    ok!(!!storage.get(String("new-key")))
+}
