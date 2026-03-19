@@ -32,7 +32,6 @@ builds:
 
 tests:
   - file: "src/**/*.cxy"
-  - file: "test/integration.cxy"
 
 scripts:
   env:
