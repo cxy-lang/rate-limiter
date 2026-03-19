@@ -1,7 +1,7 @@
 package rate_limiter
 
-// Export main middleware class
-export { RateLimiter } from "./src/middleware.cxy"
+// Export main middleware class and stats type
+export { RateLimiter, RateLimiterStats } from "./src/middleware.cxy"
 
 // Export configuration
 export { Config } from "./src/config.cxy"
@@ -12,5 +12,5 @@ export { GetIPKey, GetHeaderKey, GetCookieKey } from "./src/extractors.cxy"
 // Export strategies and types
 export { Strategy, FixedWindowState, TokenBucketState, SlidingWindowState, CheckResult } from "./src/strategies.cxy"
 
-// Export storage implementations
+// Export storage implementations and state union type
 export { HashMapStorage, RateLimitState } from "./src/storage.cxy"

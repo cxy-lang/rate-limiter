@@ -1,7 +1,10 @@
-import { RateLimiter } from "../src/middleware.cxy"
-import { Strategy } from "../src/strategies.cxy"
 import { Request, Response, Server, Config, Status, Method } from "stdlib/http.cxy"
 import { parse as parseJson, toJSON } from "stdlib/json.cxy"
+import { Address } from "stdlib/net.cxy"
+
+import { RateLimiter } from "../src/middleware.cxy"
+import { Strategy } from "../src/strategies.cxy"
+
 
 @json
 struct ConfigRequest {
@@ -18,7 +21,9 @@ struct ConfigRequest {
 type RateLimiterByIp = RateLimiter[]
 
 func main(): !void {
-    var server = Server[RateLimiterByIp](Config{})
+    var server = Server[RateLimiterByIp](
+        Config{ address: Address("127.0.0.1", 8100) }
+    )
 
     // Default configuration
     var rateLimiter = server.middleware[RateLimiterByIp]()
