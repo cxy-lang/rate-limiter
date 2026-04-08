@@ -1,34 +1,18 @@
 package:
   name: rate-limiter
-  version: 0.1.0
+  version: 0.1.1
   author: Carter Mbotho<lastcarter@gmail.com>
   description: HTTP rate limiting middleware for cxy-lang applications.
   license: MIT
-
-dependencies: []
-
-install:
-  - name: disable-macos-wait-async-warning
-    required: true
-    script: |
-      if [ $(uname) = "Darwin" ]; then
-        # Disable macOS wait async warning
-        echo "--define=MACOS_WAIT_ASYNC_WARNING_OFF=1"
-      fi
-
-install-dev:
-  - name: openssl
-    required: true
-    script: |
-      # We do not libs, cxy sources usually specify the libs they need
-      cxy package find-system openssl --include-dir --lib-dir
 
 builds:
   test-server:
     entry: test/server.cxy
     output: test-server
     defines:
-      - "CXY_TRACE_LEVEL=1"
+      - CXY_TRACE_LEVEL=1
+
+dependencies: []
 
 tests:
   - file: "src/**/*.cxy"
@@ -36,14 +20,15 @@ tests:
 scripts:
   build-ts:
     inputs:
-      - test/**/*.cxy
-      - src/**/*.cxy
+      - "test/**/*.cxy"
+      - "src/**/*.cxy"
     outputs:
       - "{{BUILD_DIR}}/test-server"
     command: |
       cxy package build test-server
+
   integration:
-    depends: ["build-ts"]
+    depends: [ build-ts ]
     command: |
       # Start the server asynchronously, cxy will kill the process after
       PID=$(cxy utils async-cmd-start {{BUILD_DIR}}/test-server --capture)
@@ -60,3 +45,22 @@ scripts:
         cxy utils async-cmd-logs $PID
         exit 1
       fi
+
+
+install:
+  - name: disable-macos-wait-async-warning
+    script: |
+      if [ $(uname) = "Darwin" ]; then
+        # Disable macOS wait async warning
+        echo "--define=MACOS_WAIT_ASYNC_WARNING_OFF=1"
+      fi
+
+    required: true
+
+install-dev:
+  - name: openssl
+    script: |
+      # We do not libs, cxy sources usually specify the libs they need
+      cxy package find-system openssl --include-dir --lib-dir
+
+    required: true
