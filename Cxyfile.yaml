@@ -1,8 +1,8 @@
 package:
   name: rate-limiter
   version: 0.1.0
-  author: n
-  description: n
+  author: Carter Mbotho<lastcarter@gmail.com>
+  description: HTTP rate limiting middleware for cxy-lang applications.
   license: MIT
 
 dependencies: []
