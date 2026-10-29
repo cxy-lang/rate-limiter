@@ -41,14 +41,14 @@ func main(): !void {
     const configRoute = server("POST /configure", (req: &const Request, res: &Response) => {
         var body = req.body()
         stdout << "BODY " << body << "\n"
-        if (body == null || body.empty()) {
+        if body.empty() {
             res.body() << "Missing request body"
             res.end(Status.BadRequest)
             return
         }
 
         // Parse JSON
-        var config = parseJson[ConfigRequest](body.__str()) catch {
+        var config = parseJson[ConfigRequest](body) catch {
             res.body() << "Invalid JSON"
             res.end(Status.BadRequest)
             return
@@ -65,8 +65,8 @@ func main(): !void {
         // Clear state when reconfiguring
         rateLimiter.clearAll()
         rateLimiter.resetStats()
-        const burstSize = config.burstSize || 0 as u64
-        const refillRate = config.refillRate || 0.0 as f64
+        const burstSize = config.burstSize ?? 0 as u64
+        const refillRate = config.refillRate ?? 0 as f64
 
         // Apply new configuration
         rateLimiter.configure({

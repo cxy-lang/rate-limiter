@@ -1,0 +1,10 @@
+// Project tasks configuration. See https://zed.dev/docs/tasks for documentation.
+//
+// Example:
+[
+  {
+    "label": "Build Generated app.c",
+    "command": "clang -g -D_DARWIN_C_SOURCE -L/opt/homebrew/Cellar/openssl@3/3.6.2/lib -L/Users/dc/projects/mono-cxy/cxy/build -I/opt/homebrew/Cellar/llvm/21.1.8/lib/clang/21/include -I/Library/Developer/CommandLineTools/SDKs/MacOSX26.2.sdk/usr/include -I/Library/Developer/CommandLineTools/SDKs/MacOSX26.2.sdk/System/Library/Frameworks -I/Library/Developer/CommandLineTools/SDKs/MacOSX26.2.sdk/System/Library/SubFrameworks -I/opt/homebrew/Cellar/openssl@3/3.6.2/include /Users/dc/projects/mono-cxy/cxy/src/cxy/stdlib/native/thread/tinythread.c /Users/dc/projects/mono-cxy/cxy/src/cxy/stdlib/native/dns/dns.c /Users/dc/projects/mono-cxy/cxy/src/cxy/stdlib/native/http/llhttp.c /Users/dc/projects/mono-cxy/cxy/src/cxy/stdlib/native/thread/thread.c /Users/dc/projects/mono-cxy/cxy/src/cxy/stdlib/native/evloop/ae.c /Users/dc/projects/mono-cxy/cxy/src/cxy/stdlib/native/nos.c /Users/dc/projects/mono-cxy/cxy/src/cxy/stdlib/native/http/api.c /Users/dc/projects/mono-cxy/cxy/src/cxy/stdlib/native/http/http.c ./test-server.c -lcxy-trace -o ./app -lcrypto -lssl ",
+    "cwd": "$ZED_WORKTREE_ROOT/.cxy/build"
+  },
+]

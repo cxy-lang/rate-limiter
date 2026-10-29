@@ -75,7 +75,7 @@ pub class HashMapStorage {
 
             // Mark for removal if expired
             if (now - lastAccess > timeoutMs) {
-                toRemove.push(__copy!(kv.0))
+                toRemove.push(kv.0)
             }
         }
 

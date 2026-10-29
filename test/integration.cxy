@@ -6,8 +6,10 @@ import test { Method, Status } from "stdlib/http.cxy"
 const BASE_URL = "http://localhost:8100"
 
 test {
-    func createSession() {
-        var session = Session.create(BASE_URL)
+    func createSession(): Session {
+        var session = Session.create(BASE_URL) catch {
+            return null
+        }
         session.userAgent("Cxy/0.0.1")
         return &&session
     }
